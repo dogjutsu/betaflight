@@ -63,10 +63,14 @@ static uint8_t FAST_RAM_ZERO_INIT    fftStartBin;
 static uint16_t FAST_RAM_ZERO_INIT   dynNotchMaxCtrHz;
 static uint8_t dynamicFilterRange;
 static float FAST_RAM_ZERO_INIT      dynNotchQ;
+static float FAST_RAM_ZERO_INIT      dynNotchStdbyQ;
 static float FAST_RAM_ZERO_INIT      dynNotch1Ctr;
 static float FAST_RAM_ZERO_INIT      dynNotch2Ctr;
+static float FAST_RAM_ZERO_INIT      dynNotchStdby1Ctr;
+static float FAST_RAM_ZERO_INIT      dynNotchStdby2Ctr;
 static uint16_t FAST_RAM_ZERO_INIT   dynNotchMinHz;
 static bool FAST_RAM dualNotch = true;
+static bool FAST_RAM dualStdbyNotch = true;
 static uint16_t FAST_RAM_ZERO_INIT dynNotchMaxFFT;
 
 // Hanning window, see https://en.wikipedia.org/wiki/Window_function#Hann_.28Hanning.29_window
@@ -86,11 +90,18 @@ void gyroDataAnalyseInit(uint32_t targetLooptimeUs)
     fftSamplingRateHz = DYN_NOTCH_RANGE_HZ_LOW;
     dynNotch1Ctr = 1 - gyroConfig()->dyn_notch_width_percent / 100.0f;
     dynNotch2Ctr = 1 + gyroConfig()->dyn_notch_width_percent / 100.0f;
+    dynNotchStdby1Ctr = 1 - gyroConfig()->dyn_notch_stdby_width_percent / 100.0f;
+    dynNotchStdby2Ctr = 1 + gyroConfig()->dyn_notch_stdby_width_percent / 100.0f;
     dynNotchQ = gyroConfig()->dyn_notch_q / 100.0f;
+    dynNotchStdbyQ = gyroConfig()->dyn_notch_stdby_q / 100.0f;
     dynNotchMinHz = gyroConfig()->dyn_notch_min_hz;
 
     if (gyroConfig()->dyn_notch_width_percent == 0) {
         dualNotch = false;
+    }
+
+    if (gyroConfig()->dyn_notch_stdby_width_percent == 0) {
+        dualStdbyNotch = false;
     }
 
     if (dynamicFilterRange == DYN_NOTCH_RANGE_AUTO) {
@@ -146,6 +157,9 @@ void gyroDataAnalyseStateInit(gyroAnalyseState_t *state, uint32_t targetLooptime
         state->centerFreq[axis] = dynNotchMaxCtrHz;
         state->prevCenterFreq[axis] = dynNotchMaxCtrHz;
         biquadFilterInitLPF(&state->detectedFrequencyFilter[axis], DYN_NOTCH_SMOOTH_FREQ_HZ, looptime);
+        state->stdbyFftBinMax[axis] = 0;
+        state->stdbyTriggered[axis] = false;
+        state->muteTriggered[axis] = false;
     }
 }
 
@@ -154,12 +168,12 @@ void gyroDataAnalysePush(gyroAnalyseState_t *state, const int axis, const float 
     state->oversampledGyroAccumulator[axis] += sample;
 }
 
-static void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2);
+static void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2, biquadFilter_t *notchFilterStdbyDyn, biquadFilter_t *notchFilterStdbyDyn2);
 
 /*
  * Collect gyro data, to be analysed in gyroDataAnalyseUpdate function
  */
-void gyroDataAnalyse(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2)
+void gyroDataAnalyse(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2, biquadFilter_t *notchFilterStdbyDyn, biquadFilter_t *notchFilterStdbyDyn2)
 {
     // samples should have been pushed by `gyroDataAnalysePush`
     // if gyro sampling is > 1kHz, accumulate multiple samples
@@ -188,7 +202,7 @@ void gyroDataAnalyse(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, 
 
     // calculate FFT and update filters
     if (state->updateTicks > 0) {
-        gyroDataAnalyseUpdate(state, notchFilterDyn, notchFilterDyn2);
+        gyroDataAnalyseUpdate(state, notchFilterDyn, notchFilterDyn2, notchFilterStdbyDyn, notchFilterStdbyDyn2);
         --state->updateTicks;
     }
 }
@@ -202,7 +216,7 @@ void arm_bitreversal_32(uint32_t *pSrc, const uint16_t bitRevLen, const uint16_t
 /*
  * Analyse last gyro data from the last FFT_WINDOW_SIZE milliseconds
  */
-static FAST_CODE_NOINLINE void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2)
+static FAST_CODE_NOINLINE void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, biquadFilter_t *notchFilterDyn, biquadFilter_t *notchFilterDyn2, biquadFilter_t *notchFilterStdbyDyn, biquadFilter_t *notchFilterStdbyDyn2)
 {
     enum {
         STEP_ARM_CFFT_F32,
@@ -286,6 +300,10 @@ static FAST_CODE_NOINLINE void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, 
                     }
                 }
             }
+
+            // To be compared to the Dyn Notch Standby/Mute trigger values; multiplied to retain precision.
+            state->stdbyFftBinMax[state->updateAxis] = lrintf(dataMax * 100);
+
             // accumulate fftSum and fftWeightedSum from peak bin, and shoulder bins either side of peak
             float cubedData = state->fftData[binMax] * state->fftData[binMax] * state->fftData[binMax];
             float fftSum = cubedData;
@@ -334,9 +352,16 @@ static FAST_CODE_NOINLINE void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, 
                 DEBUG_SET(DEBUG_FFT, 3, lrintf(fftMeanIndex * 100));
                 DEBUG_SET(DEBUG_FFT_FREQ, 0, state->centerFreq[state->updateAxis]);
                 DEBUG_SET(DEBUG_DYN_LPF, 1, state->centerFreq[state->updateAxis]);
+                DEBUG_SET(DEBUG_FFT_BIN_MAX, 0, state->stdbyFftBinMax[state->updateAxis]);
+                DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 1, state->stdbyFftBinMax[state->updateAxis]);
+                DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 2, state->centerFreq[state->updateAxis]);
             }
             if (state->updateAxis == 1) {
                 DEBUG_SET(DEBUG_FFT_FREQ, 1, state->centerFreq[state->updateAxis]);
+                DEBUG_SET(DEBUG_FFT_BIN_MAX, 1, state->stdbyFftBinMax[state->updateAxis]);
+            }
+            if (state->updateAxis == 2) {
+            DEBUG_SET(DEBUG_FFT_BIN_MAX, 2, state->stdbyFftBinMax[state->updateAxis]);
             }
             // Debug FFT_Freq carries raw gyro, gyro after first filter set, FFT centre for roll and for pitch
             DEBUG_SET(DEBUG_FFT_TIME, 1, micros() - startTime);
@@ -344,9 +369,58 @@ static FAST_CODE_NOINLINE void gyroDataAnalyseUpdate(gyroAnalyseState_t *state, 
         }
         case STEP_UPDATE_FILTERS:
         {
+            // Determine wether the Dyn Notch Mute or Standby Notch are triggered
+            state->muteTriggered[state->updateAxis] = state->stdbyFftBinMax[state->updateAxis] < gyroConfig()->dyn_notch_mute_trigger;
+            state->stdbyTriggered[state->updateAxis] = state->stdbyFftBinMax[state->updateAxis] < gyroConfig()->dyn_notch_stdby_trigger;
+
+            // Record info about triggering of Mute/Standby to appropriate debug modes
+            if (!state->muteTriggered[state->updateAxis]) {
+                if (state->stdbyTriggered[state->updateAxis]) {
+                    // Standby
+                    DEBUG_SET(DEBUG_DYN_STDBY_MUTE_TRIG, state->updateAxis, 1);
+                    if (state->updateAxis == gyroConfig()->gyro_filter_debug_axis) {
+                        DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 0, 1);
+                    }
+                }
+                else {
+                    // not Mute or Standby
+                    DEBUG_SET(DEBUG_DYN_STDBY_MUTE_TRIG, state->updateAxis, 0);
+                    if (state->updateAxis == gyroConfig()->gyro_filter_debug_axis) {
+                        DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 0, 0);
+                    }
+                }
+            }
+            else {
+                // Mute
+                DEBUG_SET(DEBUG_DYN_STDBY_MUTE_TRIG, state->updateAxis, 2);
+                if (state->updateAxis == gyroConfig()->gyro_filter_debug_axis) {
+                    DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 0, 2);
+                }
+            }
+
+            // Use Standby notch's static freq, if configured
+            uint16_t stdbyNotchFreqCenter = gyroConfig()->dyn_notch_stdby_static_hz;
+            if (stdbyNotchFreqCenter == 0)
+            {
+                stdbyNotchFreqCenter = state->centerFreq[state->updateAxis];
+            }
+            else
+            {
+                stdbyNotchFreqCenter = gyroConfig()->dyn_notch_stdby_static_hz;/* code */
+            }            
+
             // 7us
             // calculate cutoffFreq and notch Q, update notch filter  =1.8+((A2-150)*0.004)
             if (state->prevCenterFreq[state->updateAxis] != state->centerFreq[state->updateAxis]) {
+                if (dualStdbyNotch)
+                {
+                    biquadFilterUpdate(&notchFilterStdbyDyn[state->updateAxis], stdbyNotchFreqCenter * dynNotchStdby1Ctr, gyro.targetLooptime, dynNotchStdbyQ, FILTER_NOTCH);
+                    biquadFilterUpdate(&notchFilterStdbyDyn2[state->updateAxis], stdbyNotchFreqCenter * dynNotchStdby2Ctr, gyro.targetLooptime, dynNotchStdbyQ, FILTER_NOTCH);
+                }
+                else
+                {
+                    biquadFilterUpdate(&notchFilterStdbyDyn[state->updateAxis], stdbyNotchFreqCenter, gyro.targetLooptime, dynNotchStdbyQ, FILTER_NOTCH);
+                }                  
                 if (dualNotch) {
                     biquadFilterUpdate(&notchFilterDyn[state->updateAxis], state->centerFreq[state->updateAxis] * dynNotch1Ctr, gyro.targetLooptime, dynNotchQ, FILTER_NOTCH);
                     biquadFilterUpdate(&notchFilterDyn2[state->updateAxis], state->centerFreq[state->updateAxis] * dynNotch2Ctr, gyro.targetLooptime, dynNotchQ, FILTER_NOTCH);

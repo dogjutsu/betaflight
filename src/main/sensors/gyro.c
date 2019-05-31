@@ -143,8 +143,12 @@ typedef struct gyroSensor_s {
 
     filterApplyFnPtr notchFilterDynApplyFn;
     filterApplyFnPtr notchFilterDynApplyFn2;
+    filterApplyFnPtr notchFilterDynStdbyApplyFn;
+    filterApplyFnPtr notchFilterDynStdbyApplyFn2;
     biquadFilter_t notchFilterDyn[XYZ_AXIS_COUNT];
     biquadFilter_t notchFilterDyn2[XYZ_AXIS_COUNT];
+    biquadFilter_t notchFilterStdbyDyn[XYZ_AXIS_COUNT];
+    biquadFilter_t notchFilterStdbyDyn2[XYZ_AXIS_COUNT];
 
     // overflow and recovery
     timeUs_t overflowTimeUs;
@@ -227,6 +231,11 @@ void pgResetFn_gyroConfig(gyroConfig_t *gyroConfig)
     gyroConfig->dyn_notch_width_percent = 8;
     gyroConfig->dyn_notch_q = 120;
     gyroConfig->dyn_notch_min_hz = 150;
+    gyroConfig->dyn_notch_stdby_width_percent = 0;
+    gyroConfig->dyn_notch_stdby_q = 200;
+    gyroConfig->dyn_notch_stdby_static_hz = 0;
+    gyroConfig->dyn_notch_stdby_trigger = 0;
+    gyroConfig->dyn_notch_mute_trigger = 0;
     gyroConfig->gyro_filter_debug_axis = FD_ROLL;
 }
 
@@ -509,6 +518,7 @@ bool gyroInit(void)
     case DEBUG_GYRO_SCALED:
     case DEBUG_GYRO_FILTERED:
     case DEBUG_DYN_LPF:
+    case DEBUG_DYN_STDBY_MUTE:
         gyroDebugMode = debugMode;
         break;
     case DEBUG_DUAL_GYRO:
@@ -726,6 +736,8 @@ static void gyroInitFilterDynamicNotch(gyroSensor_t *gyroSensor)
 {
     gyroSensor->notchFilterDynApplyFn = nullFilterApply;
     gyroSensor->notchFilterDynApplyFn2 = nullFilterApply;
+    gyroSensor->notchFilterDynStdbyApplyFn = nullFilterApply;
+    gyroSensor->notchFilterDynStdbyApplyFn2 = nullFilterApply;
 
     if (isDynamicFilterActive()) {
         gyroSensor->notchFilterDynApplyFn = (filterApplyFnPtr)biquadFilterApplyDF1; // must be this function, not DF2
@@ -737,6 +749,17 @@ static void gyroInitFilterDynamicNotch(gyroSensor_t *gyroSensor)
             biquadFilterInit(&gyroSensor->notchFilterDyn[axis], DYNAMIC_NOTCH_DEFAULT_CENTER_HZ, gyro.targetLooptime, notchQ, FILTER_NOTCH);
             biquadFilterInit(&gyroSensor->notchFilterDyn2[axis], DYNAMIC_NOTCH_DEFAULT_CENTER_HZ, gyro.targetLooptime, notchQ, FILTER_NOTCH);
         }
+        // Init Standby notch, if enabled
+        if (gyroConfig()->dyn_notch_stdby_trigger > 0) {
+            gyroSensor->notchFilterDynStdbyApplyFn = (filterApplyFnPtr)biquadFilterApplyDF1; // must be this function, not DF2
+            if(gyroConfig()->dyn_notch_stdby_width_percent != 0) {
+                gyroSensor->notchFilterDynStdbyApplyFn2 = (filterApplyFnPtr)biquadFilterApplyDF1; // must be this function, not DF2
+            }
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                biquadFilterInit(&gyroSensor->notchFilterStdbyDyn[axis], DYNAMIC_NOTCH_DEFAULT_CENTER_HZ, gyro.targetLooptime, gyroConfig()->dyn_notch_stdby_q, FILTER_NOTCH);
+                biquadFilterInit(&gyroSensor->notchFilterStdbyDyn2[axis], DYNAMIC_NOTCH_DEFAULT_CENTER_HZ, gyro.targetLooptime, gyroConfig()->dyn_notch_stdby_q, FILTER_NOTCH);
+            }
+        } 
     }
 }
 #endif
@@ -1064,7 +1087,7 @@ static FAST_CODE FAST_CODE_NOINLINE void gyroUpdateSensor(gyroSensor_t *gyroSens
 
 #ifdef USE_GYRO_DATA_ANALYSE
     if (isDynamicFilterActive()) {
-        gyroDataAnalyse(&gyroSensor->gyroAnalyseState, gyroSensor->notchFilterDyn, gyroSensor->notchFilterDyn2);
+        gyroDataAnalyse(&gyroSensor->gyroAnalyseState, gyroSensor->notchFilterDyn, gyroSensor->notchFilterDyn2, gyroSensor->notchFilterStdbyDyn, gyroSensor->notchFilterStdbyDyn2);
     }
 #endif
 

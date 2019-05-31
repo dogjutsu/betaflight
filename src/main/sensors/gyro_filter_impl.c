@@ -56,10 +56,22 @@ static FAST_CODE void GYRO_FILTER_FUNCTION_NAME(gyroSensor_t *gyroSensor)
                 GYRO_FILTER_DEBUG_SET(DEBUG_FFT, 1, lrintf(gyroADCf));
                 GYRO_FILTER_DEBUG_SET(DEBUG_FFT_FREQ, 2, lrintf(gyroADCf));
                 GYRO_FILTER_DEBUG_SET(DEBUG_DYN_LPF, 3, lrintf(gyroADCf));
+                GYRO_FILTER_DEBUG_SET(DEBUG_DYN_STDBY_MUTE, 3, lrintf(gyroADCf));
             }
             gyroDataAnalysePush(&gyroSensor->gyroAnalyseState, axis, gyroADCf);
-            gyroADCf = gyroSensor->notchFilterDynApplyFn((filter_t *)&gyroSensor->notchFilterDyn[axis], gyroADCf);
-            gyroADCf = gyroSensor->notchFilterDynApplyFn2((filter_t *)&gyroSensor->notchFilterDyn2[axis], gyroADCf);
+
+            // Only apply a dyn filter to the gyro signal if not muted
+            if (!&gyroSensor->gyroAnalyseState.muteTriggered[axis]) {
+                // If standby triggered, apply the standby notch filter to the gyro data
+                if(&gyroSensor->gyroAnalyseState.stdbyTriggered[axis]) {
+                    gyroADCf = gyroSensor->notchFilterDynStdbyApplyFn((filter_t *)&gyroSensor->notchFilterStdbyDyn[axis], gyroADCf);
+                    gyroADCf = gyroSensor->notchFilterDynStdbyApplyFn2((filter_t *)&gyroSensor->notchFilterStdbyDyn2[axis], gyroADCf);
+                }
+                else { // Apply the normal Dyn notch to the gyro data
+                    gyroADCf = gyroSensor->notchFilterDynApplyFn((filter_t *)&gyroSensor->notchFilterDyn[axis], gyroADCf);
+                    gyroADCf = gyroSensor->notchFilterDynApplyFn2((filter_t *)&gyroSensor->notchFilterDyn2[axis], gyroADCf);
+                }                           
+            }
         }
 #endif
 
