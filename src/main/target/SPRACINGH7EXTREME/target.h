@@ -136,7 +136,6 @@
 #define USE_GYRO
 #define USE_GYRO_SPI_MPU6500
 #define USE_MULTI_GYRO
-#define DEBUG_MODE DEBUG_DUAL_GYRO_DIFF
 #undef USE_GYRO_REGISTER_DUMP
 
 #define USE_EXTI
@@ -204,6 +203,14 @@
 #define USE_SDCARD_SDIO
 #define SDCARD_DETECT_PIN PD10
 #define SDCARD_DETECT_INVERTED
+#define SDIO_DEVICE             SDIODEV_1
+#define SDIO_USE_4BIT           true
+#define SDIO_CK_PIN             PC12
+#define SDIO_CMD_PIN            PD2
+#define SDIO_D0_PIN             PC8
+#define SDIO_D1_PIN             PC9
+#define SDIO_D2_PIN             PC10
+#define SDIO_D3_PIN             PC11
 
 #define ENABLE_BLACKBOX_LOGGING_ON_SDCARD_BY_DEFAULT
 

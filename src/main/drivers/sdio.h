@@ -18,39 +18,18 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#define SDIO_CFG_TO_DEV(x) ((x) - 1)
+#define SDIO_DEV_TO_CFG(x) ((x) + 1)
 
-#include "rx/rx_spi.h"
+typedef enum {
+    SDIOINVALID = -1,
+    SDIODEV_1 = 0,
+    SDIODEV_2,
+} SDIODevice;
 
-#define MAX_MISSING_PKT 100
+#define SDIODEV_COUNT 2
 
-#define DEBUG_DATA_ERROR_COUNT 0
-#define DEBUG_DATA_MISSING_PACKETS 1
-#define DEBUG_DATA_BAD_FRAME 2
-
-
-#define SYNC_DELAY_MAX 9000
-
-#define MAX_MISSING_PKT 100
-
-enum {
-    STATE_INIT = 0,
-    STATE_BIND,
-    STATE_BIND_TUNING,
-    STATE_BIND_BINDING1,
-    STATE_BIND_BINDING2,
-    STATE_BIND_COMPLETE,
-    STATE_STARTING,
-    STATE_UPDATE,
-    STATE_DATA,
-    STATE_TELEMETRY,
-    STATE_RESUME,
-};
-
-extern uint8_t listLength;
-extern uint32_t missingPackets;
-extern timeDelta_t timeoutUs;
-
-void initialiseData(bool inBindState);
-
-void nextChannel(uint8_t skip);
+#if defined(STM32H7)
+void sdioPinConfigure();
+void SDIO_GPIO_Init(void);
+#endif

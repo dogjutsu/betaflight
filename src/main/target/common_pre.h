@@ -67,6 +67,7 @@
 #define USE_DMA_SPEC
 #define USE_TIMER_MGMT
 #define USE_PERSISTENT_OBJECTS
+#define USE_CUSTOM_DEFAULTS_ADDRESS
 // Re-enable this after 4.0 has been released, and remove the define from STM32F4DISCOVERY
 //#define USE_SPI_TRANSACTION
 
@@ -97,6 +98,7 @@
 #define USE_DMA_SPEC
 #define USE_TIMER_MGMT
 #define USE_PERSISTENT_OBJECTS
+#define USE_CUSTOM_DEFAULTS_ADDRESS
 // Re-enable this after 4.0 has been released, and remove the define from STM32F4DISCOVERY
 //#define USE_SPI_TRANSACTION
 #endif // STM32F7
@@ -105,6 +107,10 @@
 #define USE_ITCM_RAM
 #define USE_FAST_RAM
 #define USE_DSHOT
+#define USE_DSHOT_TELEMETRY
+#define USE_DSHOT_TELEMETRY_STATS
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
 #define USE_GYRO_DATA_ANALYSE
 #define USE_ADC_INTERNAL
 #define USE_USB_CDC_HID

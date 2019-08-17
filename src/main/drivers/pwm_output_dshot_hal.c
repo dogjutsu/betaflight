@@ -181,7 +181,7 @@ static void motor_DMA_IRQHandler(dmaChannelDescriptor_t* descriptor)
     }
 }
 
-void pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, motorPwmProtocolTypes_e pwmProtocolType, uint8_t output)
+bool pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, motorPwmProtocolTypes_e pwmProtocolType, uint8_t output)
 {
 #ifdef USE_DSHOT_TELEMETRY
 #define OCINIT motor->ocInitStruct
@@ -215,7 +215,7 @@ void pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t m
 #endif
 
     if (dmaRef == NULL) {
-        return;
+        return false;
     }
 
     motorDmaOutput_t * const motor = &dmaMotors[motorIndex];
@@ -308,7 +308,11 @@ void pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t m
 
         motor->timer->dmaBurstBuffer = &dshotBurstDmaBuffer[timerIndex][0];
 
+#if defined(STM32H7)
+        DMAINIT.PeriphRequest = dmaChannel;
+#else
         DMAINIT.Channel = dmaChannel;
+#endif
         DMAINIT.MemoryOrM2MDstAddress = (uint32_t)motor->timer->dmaBurstBuffer;
         DMAINIT.FIFOThreshold = LL_DMA_FIFOTHRESHOLD_FULL;
         DMAINIT.PeriphOrM2MSrcAddress = (uint32_t)&timerHardware->tim->DMAR;
@@ -319,7 +323,11 @@ void pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t m
 
         motor->dmaBuffer = &dshotDmaBuffer[motorIndex][0];
 
+#if defined(STM32H7)
+        DMAINIT.PeriphRequest = dmaChannel;
+#else
         DMAINIT.Channel = dmaChannel;
+#endif
         DMAINIT.MemoryOrM2MDstAddress = (uint32_t)motor->dmaBuffer;
         DMAINIT.FIFOThreshold = LL_DMA_FIFOTHRESHOLD_1_4;
         DMAINIT.PeriphOrM2MSrcAddress = (uint32_t)timerChCCR(timerHardware);
@@ -381,5 +389,7 @@ void pwmDshotMotorHardwareConfig(const timerHardware_t *timerHardware, uint8_t m
     }
 #endif
     motor->configured = true;
+
+    return true;
 }
 #endif
