@@ -30,8 +30,6 @@
 #include "build/build_config.h"
 #include "build/debug.h"
 
-#include "cli/cli.h"
-
 #include "cms/cms.h"
 #include "cms/cms_types.h"
 
@@ -69,6 +67,7 @@
 #include "drivers/serial_softserial.h"
 #include "drivers/serial_uart.h"
 #include "drivers/sdcard.h"
+#include "drivers/sdio.h"
 #include "drivers/sound_beeper.h"
 #include "drivers/system.h"
 #include "drivers/time.h"
@@ -181,8 +180,6 @@ serialPort_t *loopbackPort;
 
 uint8_t systemState = SYSTEM_STATE_INITIALISING;
 
-void SDIO_GPIO_Init(void);
-
 void processLoopback(void)
 {
 #ifdef SOFTSERIAL_LOOPBACK
@@ -290,7 +287,7 @@ void init(void)
     uint8_t initFlags = 0;
 
 
-#ifdef EEPROM_IN_SDCARD
+#ifdef CONFIG_IN_SDCARD
 
     //
     // Config in sdcard presents an issue with pin configuration since the pin and sdcard configs for the
@@ -302,7 +299,7 @@ void init(void)
     // the system to boot and/or to save the config.
     //
     // note that target specific SDCARD/SDIO/SPI/QUADSPI configs are
-    // also not supported in USE_TARGET_CONFIG/targetConfigure() when using EEPROM_IN_SDCARD.
+    // also not supported in USE_TARGET_CONFIG/targetConfigure() when using CONFIG_IN_SDCARD.
     //
 
     //
@@ -312,12 +309,13 @@ void init(void)
     //
 
 #ifdef TARGET_BUS_INIT
-#error "EEPROM_IN_SDCARD and TARGET_BUS_INIT are mutually exclusive"
+#error "CONFIG_IN_SDCARD and TARGET_BUS_INIT are mutually exclusive"
 #endif
 
     pgResetAll();
 
 #if defined(STM32H7) && defined(USE_SDCARD_SDIO) // H7 only for now, likely should be applied to F4/F7 too
+    sdioPinConfigure();
     SDIO_GPIO_Init();
 #endif
 #ifdef USE_SDCARD_SPI
@@ -336,9 +334,9 @@ void init(void)
         }
     }
 
-#endif // EEPROM_IN_SDCARD
+#endif // CONFIG_IN_SDCARD
 
-#ifdef EEPROM_IN_EXTERNAL_FLASH
+#ifdef CONFIG_IN_EXTERNAL_FLASH
     //
     // Config on external flash presents an issue with pin configuration since the pin and flash configs for the
     // external flash are in the config which is on a chip which we can't read yet!
@@ -349,7 +347,7 @@ void init(void)
     // the system to boot and/or to save the config.
     //
     // note that target specific FLASH/SPI/QUADSPI configs are
-    // also not supported in USE_TARGET_CONFIG/targetConfigure() when using EEPROM_IN_EXTERNAL_FLASH.
+    // also not supported in USE_TARGET_CONFIG/targetConfigure() when using CONFIG_IN_EXTERNAL_FLASH.
     //
 
     //
@@ -360,7 +358,7 @@ void init(void)
     pgResetAll();
 
 #ifdef TARGET_BUS_INIT
-#error "EEPROM_IN_EXTERNAL_FLASH and TARGET_BUS_INIT are mutually exclusive"
+#error "CONFIG_IN_EXTERNAL_FLASH and TARGET_BUS_INIT are mutually exclusive"
 #endif
 
     configureSPIAndQuadSPI();
@@ -368,7 +366,7 @@ void init(void)
 
 
 #ifndef USE_FLASH_CHIP
-#error "EEPROM_IN_EXTERNAL_FLASH requires USE_FLASH_CHIP to be defined."
+#error "CONFIG_IN_EXTERNAL_FLASH requires USE_FLASH_CHIP to be defined."
 #endif
 
     bool haveFlash = flashInit(flashConfig());
@@ -378,7 +376,7 @@ void init(void)
     }
     initFlags |= FLASH_INIT_ATTEMPTED;
 
-#endif // EEPROM_IN_EXTERNAL_FLASH
+#endif // CONFIG_IN_EXTERNAL_FLASH
 
     initEEPROM();
 
@@ -618,6 +616,7 @@ void init(void)
 
 #if defined(STM32H7) && defined(USE_SDCARD_SDIO) // H7 only for now, likely should be applied to F4/F7 too
     if (!(initFlags & SD_INIT_ATTEMPTED)) {
+        sdioPinConfigure();
         SDIO_GPIO_Init();
     }
 #endif
@@ -724,10 +723,6 @@ void init(void)
 
     mspInit();
     mspSerialInit();
-
-#ifdef USE_CLI
-    cliInit(serialConfig());
-#endif
 
     failsafeInit();
 

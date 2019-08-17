@@ -122,6 +122,11 @@ static bool dshotPwmEnableMotors(void)
     return true;
 }
 
+static bool dshotPwmIsMotorEnabled(uint8_t index)
+{
+    return motors[index].enabled;
+}
+
 static FAST_CODE void dshotWriteInt(uint8_t index, uint16_t value)
 {
     pwmWriteDshotInt(index, value);
@@ -135,6 +140,7 @@ static FAST_CODE void dshotWrite(uint8_t index, float value)
 static motorVTable_t dshotPwmVTable = {
     .enable = dshotPwmEnableMotors,
     .disable = dshotPwmDisableMotors,
+    .isMotorEnabled = dshotPwmIsMotorEnabled,
     .updateStart = motorUpdateStartNull, // May be updated after copying
     .write = dshotWrite,
     .writeInt = dshotWriteInt,
@@ -177,24 +183,28 @@ motorDevice_t *dshotPwmDevInit(const motorDevConfig_t *motorConfig, uint16_t idl
 
     for (int motorIndex = 0; motorIndex < MAX_SUPPORTED_MOTORS && motorIndex < motorCount; motorIndex++) {
         const ioTag_t tag = motorConfig->ioTags[motorIndex];
-        const timerHardware_t *timerHardware = timerGetByTag(tag);
+        const timerHardware_t *timerHardware = timerAllocate(tag, OWNER_MOTOR, RESOURCE_INDEX(motorIndex));
 
-        if (timerHardware == NULL) {
-            /* not enough motors initialised for the mixer or a break in the motors */
-            dshotPwmDevice.vTable.write = motorWriteNull;
-            dshotPwmDevice.vTable.updateComplete = motorUpdateCompleteNull;
-            /* TODO: block arming and add reason system cannot arm */
-            return NULL;
+        if (timerHardware != NULL) {
+            motors[motorIndex].io = IOGetByTag(tag);
+            IOInit(motors[motorIndex].io, OWNER_MOTOR, RESOURCE_INDEX(motorIndex));
+
+            if (pwmDshotMotorHardwareConfig(timerHardware,
+                motorIndex,
+                motorConfig->motorPwmProtocol,
+                motorConfig->motorPwmInversion ? timerHardware->output ^ TIMER_OUTPUT_INVERTED : timerHardware->output)) {
+                motors[motorIndex].enabled = true;
+
+                continue;
+            }
         }
 
-        motors[motorIndex].io = IOGetByTag(tag);
-        IOInit(motors[motorIndex].io, OWNER_MOTOR, RESOURCE_INDEX(motorIndex));
+        /* not enough motors initialised for the mixer or a break in the motors */
+        dshotPwmDevice.vTable.write = motorWriteNull;
+        dshotPwmDevice.vTable.updateComplete = motorUpdateCompleteNull;
 
-        pwmDshotMotorHardwareConfig(timerHardware,
-            motorIndex,
-            motorConfig->motorPwmProtocol,
-            motorConfig->motorPwmInversion ? timerHardware->output ^ TIMER_OUTPUT_INVERTED : timerHardware->output);
-        motors[motorIndex].enabled = true;
+        /* TODO: block arming and add reason system cannot arm */
+        return NULL;
     }
 
     return &dshotPwmDevice;

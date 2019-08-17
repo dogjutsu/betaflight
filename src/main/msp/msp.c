@@ -157,7 +157,7 @@ typedef enum {
 } mspSDCardState_e;
 
 typedef enum {
-    MSP_SDCARD_FLAG_SUPPORTTED   = 1
+    MSP_SDCARD_FLAG_SUPPORTED   = 1
 } mspSDCardFlags_e;
 
 typedef enum {
@@ -177,7 +177,7 @@ static uint32_t getFeatureMask(void)
     if (featureMaskIsCopied) {
         return featureMaskCopy;
     } else {
-        return featureMask();
+        return featureConfig()->enabledFeatures;
     }
 }
 
@@ -296,56 +296,57 @@ static void mspRebootFn(serialPort_t *serialPort)
 
 static void serializeSDCardSummaryReply(sbuf_t *dst)
 {
-#ifdef USE_SDCARD
-    uint8_t flags = MSP_SDCARD_FLAG_SUPPORTTED;
+    uint8_t flags = 0;
     uint8_t state = 0;
+    uint8_t lastError = 0;
+    uint32_t freeSpace = 0;
+    uint32_t totalSpace = 0;
 
-    sbufWriteU8(dst, flags);
+#if defined(USE_SDCARD)
+    if (sdcardConfig()->mode) {
+        flags = MSP_SDCARD_FLAG_SUPPORTED;
 
-    // Merge the card and filesystem states together
-    if (!sdcard_isInserted()) {
-        state = MSP_SDCARD_STATE_NOT_PRESENT;
-    } else if (!sdcard_isFunctional()) {
-        state = MSP_SDCARD_STATE_FATAL;
-    } else {
-        switch (afatfs_getFilesystemState()) {
-        case AFATFS_FILESYSTEM_STATE_READY:
-            state = MSP_SDCARD_STATE_READY;
-            break;
-
-        case AFATFS_FILESYSTEM_STATE_INITIALIZATION:
-            if (sdcard_isInitialized()) {
-                state = MSP_SDCARD_STATE_FS_INIT;
-            } else {
-                state = MSP_SDCARD_STATE_CARD_INIT;
-            }
-            break;
-
-        case AFATFS_FILESYSTEM_STATE_FATAL:
-        case AFATFS_FILESYSTEM_STATE_UNKNOWN:
-        default:
+        // Merge the card and filesystem states together
+        if (!sdcard_isInserted()) {
+            state = MSP_SDCARD_STATE_NOT_PRESENT;
+        } else if (!sdcard_isFunctional()) {
             state = MSP_SDCARD_STATE_FATAL;
-            break;
+        } else {
+            switch (afatfs_getFilesystemState()) {
+            case AFATFS_FILESYSTEM_STATE_READY:
+                state = MSP_SDCARD_STATE_READY;
+                break;
+
+            case AFATFS_FILESYSTEM_STATE_INITIALIZATION:
+             if (sdcard_isInitialized()) {
+                 state = MSP_SDCARD_STATE_FS_INIT;
+             } else {
+                 state = MSP_SDCARD_STATE_CARD_INIT;
+             }
+             break;
+
+            case AFATFS_FILESYSTEM_STATE_FATAL:
+            case AFATFS_FILESYSTEM_STATE_UNKNOWN:
+            default:
+                state = MSP_SDCARD_STATE_FATAL;
+                break;
+            }
+        }
+
+        lastError = afatfs_getLastError();
+        // Write free space and total space in kilobytes
+        if (state == MSP_SDCARD_STATE_READY) {
+            freeSpace = afatfs_getContiguousFreeSpace() / 1024;
+            totalSpace = sdcard_getMetadata()->numBlocks / 2;
         }
     }
-
-    sbufWriteU8(dst, state);
-    sbufWriteU8(dst, afatfs_getLastError());
-    // Write free space and total space in kilobytes
-    if (state == MSP_SDCARD_STATE_READY) {
-        sbufWriteU32(dst, afatfs_getContiguousFreeSpace() / 1024);
-        sbufWriteU32(dst, sdcard_getMetadata()->numBlocks / 2); // Block size is half a kilobyte
-    } else {
-        sbufWriteU32(dst, 0);
-        sbufWriteU32(dst, 0);
-    }
-#else
-    sbufWriteU8(dst, 0);
-    sbufWriteU8(dst, 0);
-    sbufWriteU8(dst, 0);
-    sbufWriteU32(dst, 0);
-    sbufWriteU32(dst, 0);
 #endif
+
+    sbufWriteU8(dst, flags);
+    sbufWriteU8(dst, state);
+    sbufWriteU8(dst, lastError);
+    sbufWriteU32(dst, freeSpace);
+    sbufWriteU32(dst, totalSpace);
 }
 
 static void serializeDataflashSummaryReply(sbuf_t *dst)
@@ -514,6 +515,7 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
 #define TARGET_HAS_VCP_BIT 0
 #define TARGET_HAS_SOFTSERIAL_BIT 1
 #define TARGET_IS_UNIFIED_BIT 2
+#define TARGET_HAS_FLASH_BOOTLOADER_BIT 3
 
         uint8_t targetCapabilities = 0;
 #ifdef USE_VCP
@@ -525,7 +527,9 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
 #if defined(USE_UNIFIED_TARGET)
         targetCapabilities |= 1 << TARGET_IS_UNIFIED_BIT;
 #endif
-
+#if defined(USE_FLASH_BOOT_LOADER)
+        targetCapabilities |= 1 << TARGET_HAS_FLASH_BOOTLOADER_BIT;
+#endif
         sbufWriteU8(dst, targetCapabilities);
 
         // Target name with explicit length
@@ -611,7 +615,7 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
 
         // battery alerts
         sbufWriteU8(dst, (uint8_t)getBatteryState());
-		
+
         sbufWriteU16(dst, getBatteryVoltage()); // in 0.01V steps
         break;
     }
@@ -958,8 +962,8 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 
     case MSP_MOTOR:
         for (unsigned i = 0; i < 8; i++) {
-#ifdef USE_PWM_OUTPUT
-            if (i >= MAX_SUPPORTED_MOTORS || !pwmGetMotors()[i].enabled) {
+#ifdef USE_MOTOR
+            if (i >= MAX_SUPPORTED_MOTORS || !motorIsMotorEnabled(i)) {
                 sbufWriteU16(dst, 0);
                 continue;
             }
@@ -1419,6 +1423,9 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, gyroConfig()->gyroCalibrationDuration);
         sbufWriteU16(dst, gyroConfig()->gyro_offset_yaw);
         sbufWriteU8(dst, gyroConfig()->checkOverflow);
+        //Added in MSP API 1.42
+        sbufWriteU8(dst, systemConfig()->debug_mode);
+        sbufWriteU8(dst, DEBUG_COUNT);
 
         break;
     case MSP_FILTER_CONFIG :
@@ -1452,7 +1459,18 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, 0);
         sbufWriteU16(dst, 0);
 #endif
-
+#if defined(USE_GYRO_DATA_ANALYSE)
+        // Added in MSP API 1.42
+        sbufWriteU8(dst, gyroConfig()->dyn_notch_range);
+        sbufWriteU8(dst, gyroConfig()->dyn_notch_width_percent);
+        sbufWriteU16(dst, gyroConfig()->dyn_notch_q);
+        sbufWriteU16(dst, gyroConfig()->dyn_notch_min_hz);
+#else
+        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+        sbufWriteU16(dst, 0);
+        sbufWriteU16(dst, 0);
+#endif
         break;
     case MSP_PID_ADVANCED:
         sbufWriteU16(dst, 0);
@@ -1519,6 +1537,12 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, currentPidProfile->integrated_yaw_relax);
 #else
         sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_ITERM_RELAX)
+        // Added in MSP API 1.42
+        sbufWriteU8(dst, currentPidProfile->iterm_relax_cutoff);
+#else
         sbufWriteU8(dst, 0);
 #endif
 
@@ -2074,6 +2098,10 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             gyroConfigMutable()->gyro_offset_yaw = sbufReadU16(src);
             gyroConfigMutable()->checkOverflow = sbufReadU8(src);
         }
+        if (sbufBytesRemaining(src) >= 1) {
+            //Added in MSP API 1.42
+            systemConfigMutable()->debug_mode = sbufReadU8(src);
+        }
 
         validateAndFixGyroConfig();
 
@@ -2115,6 +2143,20 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
 #else
             sbufReadU16(src);
             sbufReadU16(src);
+            sbufReadU16(src);
+            sbufReadU16(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 6) {
+            // Added in MSP API 1.42
+#if defined(USE_GYRO_DATA_ANALYSE)
+            gyroConfigMutable()->dyn_notch_range = sbufReadU8(src);
+            gyroConfigMutable()->dyn_notch_width_percent = sbufReadU8(src);
+            gyroConfigMutable()->dyn_notch_q = sbufReadU16(src);
+            gyroConfigMutable()->dyn_notch_min_hz = sbufReadU16(src);
+#else
+            sbufReadU8(src);
+            sbufReadU8(src);
             sbufReadU16(src);
             sbufReadU16(src);
 #endif
@@ -2204,6 +2246,14 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             currentPidProfile->integrated_yaw_relax = sbufReadU8(src);
 #else
             sbufReadU8(src);
+            sbufReadU8(src);
+#endif
+        }
+        if(sbufBytesRemaining(src) >= 1) {
+            // Added in MSP API 1.42
+#if defined(USE_ITERM_RELAX)
+            currentPidProfile->iterm_relax_cutoff = sbufReadU8(src);
+#else
             sbufReadU8(src);
 #endif
         }
