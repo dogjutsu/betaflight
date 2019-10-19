@@ -105,4 +105,7 @@ const char * const ownerNames[OWNER_TOTAL_COUNT] = {
     "QSPI_BK2IO3",
     "QSPI_BK2CS",
     "BARO_XCLR",
+    "PULLUP",
+    "PULLDOWN",
+    "DSHOT_BITBANG",
 };

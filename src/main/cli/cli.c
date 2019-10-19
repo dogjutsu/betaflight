@@ -66,6 +66,7 @@ bool cliMode = false;
 #include "drivers/dshot.h"
 #include "drivers/dshot_command.h"
 #include "drivers/dshot_dpwm.h"
+#include "drivers/pwm_output_dshot_shared.h"
 #include "drivers/camera_control.h"
 #include "drivers/compass/compass.h"
 #include "drivers/display.h"
@@ -137,6 +138,7 @@ bool cliMode = false;
 #include "pg/mco.h"
 #include "pg/motor.h"
 #include "pg/pinio.h"
+#include "pg/pin_pull_up_down.h"
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
 #include "pg/rx.h"
@@ -226,8 +228,8 @@ static char cliBufferTemp[CLI_IN_BUFFER_SIZE];
 #endif
 
 #if defined(USE_CUSTOM_DEFAULTS_ADDRESS)
-static char __attribute__ ((section(".custom_defaults_address"))) *customDefaultsStart = CUSTOM_DEFAULTS_START;
-static char __attribute__ ((section(".custom_defaults_address"))) *customDefaultsEnd = CUSTOM_DEFAULTS_END;
+static char __attribute__ ((section(".custom_defaults_start_address"))) *customDefaultsStart = CUSTOM_DEFAULTS_START;
+static char __attribute__ ((section(".custom_defaults_end_address"))) *customDefaultsEnd = CUSTOM_DEFAULTS_END;
 #endif
 
 #ifndef USE_QUAD_MIXER_ONLY
@@ -249,7 +251,7 @@ static const char * const featureNames[] = {
     "RANGEFINDER", "TELEMETRY", "", "3D", "RX_PARALLEL_PWM",
     "RX_MSP", "RSSI_ADC", "LED_STRIP", "DISPLAY", "OSD",
     "", "CHANNEL_FORWARDING", "TRANSPONDER", "AIRMODE",
-    "", "", "RX_SPI", "SOFTSPI", "ESC_SENSOR", "ANTI_GRAVITY", "DYNAMIC_FILTER", NULL
+    "", "", "RX_SPI", "", "ESC_SENSOR", "ANTI_GRAVITY", "DYNAMIC_FILTER", NULL
 };
 
 // sync this with rxFailsafeChannelMode_e
@@ -272,12 +274,6 @@ static const char * const *sensorHardwareNames[] = {
     lookupTableGyroHardware, lookupTableAccHardware, lookupTableBaroHardware, lookupTableMagHardware, lookupTableRangefinderHardware
 };
 #endif // USE_SENSOR_NAMES
-
-#if defined(USE_DSHOT) && defined(USE_DSHOT_TELEMETRY)
-extern uint32_t readDoneCount;
-extern uint32_t inputBuffer[GCR_TELEMETRY_INPUT_LEN];
-extern uint32_t setDirectionMicros;
-#endif
 
 typedef enum dumpFlags_e {
     DUMP_MASTER = (1 << 0),
@@ -314,8 +310,12 @@ static void cliWriterFlush()
 }
 
 
-static void cliPrint(const char *str)
+void cliPrint(const char *str)
 {
+    if (!cliMode) {
+        return;
+    }
+
     if (cliWriter) {
         while (*str) {
             bufWriterAppend(cliWriter, *str++);
@@ -324,12 +324,12 @@ static void cliPrint(const char *str)
     }
 }
 
-static void cliPrintLinefeed(void)
+void cliPrintLinefeed(void)
 {
     cliPrint("\r\n");
 }
 
-static void cliPrintLine(const char *str)
+void cliPrintLine(const char *str)
 {
     cliPrint(str);
     cliPrintLinefeed();
@@ -395,8 +395,12 @@ static bool cliDefaultPrintLinef(dumpFlags_t dumpMask, bool equalsDefault, const
     }
 }
 
-static void cliPrintf(const char *format, ...)
+void cliPrintf(const char *format, ...)
 {
+    if (!cliMode) {
+        return;
+    }
+
     va_list va;
     va_start(va, format);
     cliPrintfva(format, va);
@@ -404,8 +408,12 @@ static void cliPrintf(const char *format, ...)
 }
 
 
-static void cliPrintLinef(const char *format, ...)
+void cliPrintLinef(const char *format, ...)
 {
+    if (!cliMode) {
+        return;
+    }
+
     va_list va;
     va_start(va, format);
     cliPrintfva(format, va);
@@ -671,12 +679,16 @@ static bool isWritingConfigToCopy()
         ;
 }
 
+#if defined(USE_CUSTOM_DEFAULTS)
+bool cliProcessCustomDefaults(void);
+#endif
+
 static void backupAndResetConfigs(const bool useCustomDefaults)
 {
     backupConfigs();
 
     // reset all configs to defaults to do differencing
-    resetConfigs();
+    resetConfig();
 
 #if defined(USE_CUSTOM_DEFAULTS)
     if (useCustomDefaults) {
@@ -2319,6 +2331,12 @@ static void cliSdInfo(char *cmdline)
 
     cliPrint("SD card: ");
 
+    if (sdcardConfig()->mode == SDCARD_MODE_NONE) {
+        cliPrintLine("Not configured");
+
+        return;
+    }
+
     if (!sdcard_isInserted()) {
         cliPrintLine("None inserted");
         return;
@@ -2986,23 +3004,6 @@ static void printName(dumpFlags_t dumpMask, const pilotConfig_t *pilotConfig)
     cliDumpPrintLinef(dumpMask, equalsDefault, "\r\n# name: %s", equalsDefault ? emptyName : pilotConfig->name);
 }
 
-static void cliName(char *cmdline)
-{
-    const unsigned int len = strlen(cmdline);
-    bool updated = false;
-    if (len > 0) {
-        memset(pilotConfigMutable()->name, 0, ARRAYLEN(pilotConfig()->name));
-        if (strncmp(cmdline, emptyName, len)) {
-            strncpy(pilotConfigMutable()->name, cmdline, MIN(len, MAX_NAME_LENGTH));
-        }
-        updated = true;
-    }
-    printName(DUMP_MASTER, pilotConfig());
-    if (updated) {
-        cliPrintLine("###WARNING: This command will be removed. Use 'set name = ' instead.###");
-    }
-}
-
 #if defined(USE_BOARD_INFO)
 
 #define ERROR_MESSAGE "%s CANNOT BE CHANGED. CURRENT VALUE: '%s'"
@@ -3017,12 +3018,14 @@ static void printBoardName(dumpFlags_t dumpMask)
 static void cliBoardName(char *cmdline)
 {
     const unsigned int len = strlen(cmdline);
-    if (len > 0 && boardInformationIsSet() && (len != strlen(getBoardName()) || strncmp(getBoardName(), cmdline, len))) {
-        cliPrintErrorLinef(ERROR_MESSAGE, "BOARD_NAME", getBoardName());
+    const char *boardName = getBoardName();
+    if (len > 0 && strlen(boardName) != 0 && boardInformationIsSet() && (len != strlen(boardName) || strncmp(boardName, cmdline, len))) {
+        cliPrintErrorLinef(ERROR_MESSAGE, "BOARD_NAME", boardName);
     } else {
-        if (len > 0) {
-            setBoardName(cmdline);
+        if (len > 0 && !configIsInCopy && setBoardName(cmdline)) {
             boardInformationUpdated = true;
+
+            cliPrintHashLine("Set board_name.");
         }
         printBoardName(DUMP_ALL);
     }
@@ -3038,12 +3041,14 @@ static void printManufacturerId(dumpFlags_t dumpMask)
 static void cliManufacturerId(char *cmdline)
 {
     const unsigned int len = strlen(cmdline);
-    if (len > 0 && boardInformationIsSet() && (len != strlen(getManufacturerId()) || strncmp(getManufacturerId(), cmdline, len))) {
-        cliPrintErrorLinef(ERROR_MESSAGE, "MANUFACTURER_ID", getManufacturerId());
+    const char *manufacturerId = getManufacturerId();
+    if (len > 0 && boardInformationIsSet() && strlen(manufacturerId) != 0 && (len != strlen(manufacturerId) || strncmp(manufacturerId, cmdline, len))) {
+        cliPrintErrorLinef(ERROR_MESSAGE, "MANUFACTURER_ID", manufacturerId);
     } else {
-        if (len > 0) {
-            setManufacturerId(cmdline);
+        if (len > 0 && !configIsInCopy && setManufacturerId(cmdline)) {
             boardInformationUpdated = true;
+
+            cliPrintHashLine("Set manufacturer_id.");
         }
         printManufacturerId(DUMP_ALL);
     }
@@ -3092,12 +3097,12 @@ static void cliSignature(char *cmdline)
         writeSignature(signatureStr, getSignature());
         cliPrintErrorLinef(ERROR_MESSAGE, "SIGNATURE", signatureStr);
     } else {
-        if (len > 0) {
-            setSignature(signature);
-
+        if (len > 0 && !configIsInCopy && setSignature(signature)) {
             signatureUpdated = true;
 
             writeSignature(signatureStr, getSignature());
+
+            cliPrintHashLine("Set signature.");
         } else if (signatureUpdated || signatureIsSet()) {
             writeSignature(signatureStr, getSignature());
         }
@@ -3325,8 +3330,13 @@ static void cliBeeper(char *cmdline)
 #if defined(USE_RX_SPI) || defined (USE_SERIALRX_SRXL2)
 void cliRxBind(char *cmdline){
     UNUSED(cmdline);
-    if (featureIsEnabled(FEATURE_RX_SERIAL)) {
-        switch (rxConfig()->serialrx_provider) {
+    switch (rxRuntimeConfig.rxProvider) {
+    default:
+        cliPrint("Not supported.");
+
+        break;
+    case RX_PROVIDER_SERIAL:
+        switch (rxRuntimeConfig.serialrxProvider) {
         default:
             cliPrint("Not supported.");
             break;
@@ -3337,9 +3347,10 @@ void cliRxBind(char *cmdline){
             break;
 #endif
         }
-    } 
+
+        break;
 #if defined(USE_RX_SPI)
-    else if (featureIsEnabled(FEATURE_RX_SPI)) {
+    case RX_PROVIDER_SPI:
         switch (rxSpiConfig()->rx_spi_protocol) {
         default:
             cliPrint("Not supported.");
@@ -3369,9 +3380,10 @@ void cliRxBind(char *cmdline){
             break;
 #endif
         }
-    
-    }
+
+        break;
 #endif
+    }
 }
 #endif
 
@@ -4136,25 +4148,19 @@ static void cliBatch(char *cmdline)
 }
 #endif
 
-static void cliSave(char *cmdline)
+static bool prepareSave(void)
 {
-    UNUSED(cmdline);
-
 #if defined(USE_CUSTOM_DEFAULTS)
     if (processingCustomDefaults) {
-        return;
+        return true;
     }
 #endif
 
 #ifdef USE_CLI_BATCH
     if (commandBatchActive && commandBatchError) {
-        cliPrintCommandBatchWarning("PLEASE FIX ERRORS THEN 'SAVE'");
-        resetCommandBatch();
-        return;
+        return false;
     }
 #endif
-
-    cliPrintHashLine("saving");
 
 #if defined(USE_BOARD_INFO)
     if (boardInformationUpdated) {
@@ -4168,18 +4174,64 @@ static void cliSave(char *cmdline)
 #endif // USE_BOARD_INFO
 
     if (featureMaskIsCopied) {
-        writeEEPROMWithFeatures(featureMaskCopy);
-    } else {
-        writeEEPROM();
+        featureDisableAll();
+        featureEnable(featureMaskCopy);
     }
 
-    cliReboot();
+    return true;
+}
+
+bool tryPrepareSave(void)
+{
+    bool success = prepareSave();
+#if defined(USE_CLI_BATCH)
+    if (!success) {
+        cliPrintCommandBatchWarning("PLEASE FIX ERRORS THEN 'SAVE'");
+        resetCommandBatch();
+
+        return false;
+    }
+#else
+    UNUSED(success);
+#endif
+
+    return true;
+}
+
+static void cliSave(char *cmdline)
+{
+    UNUSED(cmdline);
+
+    if (tryPrepareSave()) {
+        writeEEPROM();
+        cliPrintHashLine("saving");
+
+        cliReboot();
+    }
 }
 
 #if defined(USE_CUSTOM_DEFAULTS)
-static bool isDefaults(char *ptr)
+bool resetConfigToCustomDefaults(void)
+{
+    resetConfig();
+
+#ifdef USE_CLI_BATCH
+    commandBatchError = false;
+#endif
+
+    cliProcessCustomDefaults();
+
+    return prepareSave();
+}
+
+static bool isCustomDefaults(char *ptr)
 {
     return strncmp(ptr, "# " FC_FIRMWARE_NAME, 12) == 0;
+}
+
+bool hasCustomDefaults(void)
+{
+    return isCustomDefaults(customDefaultsStart);
 }
 #endif
 
@@ -4203,7 +4255,7 @@ static void cliDefaults(char *cmdline)
         useCustomDefaults = false;
     } else if (strncasecmp(cmdline, "show", 4) == 0) {
         char *customDefaultsPtr = customDefaultsStart;
-        if (isDefaults(customDefaultsPtr)) {
+        if (isCustomDefaults(customDefaultsPtr)) {
             while (*customDefaultsPtr && *customDefaultsPtr != 0xFF && customDefaultsPtr < customDefaultsEnd) {
                 if (*customDefaultsPtr != '\n') {
                     cliPrintf("%c", *customDefaultsPtr++);
@@ -4226,7 +4278,7 @@ static void cliDefaults(char *cmdline)
 
     cliPrintHashLine("resetting to defaults");
 
-    resetConfigs();
+    resetConfig();
 
 #ifdef USE_CLI_BATCH
     // Reset only the error state and allow the batch active state to remain.
@@ -4242,8 +4294,10 @@ static void cliDefaults(char *cmdline)
     }
 #endif
 
-    if (saveConfigs) {
-        cliSave(NULL);
+    if (saveConfigs && tryPrepareSave()) {
+        writeUnmodifiedConfigToEEPROM();
+
+        cliReboot();
     }
 }
 
@@ -4717,11 +4771,30 @@ static void cliVersion(char *cmdline)
         shortGitRevision,
         MSP_API_VERSION_STRING
     );
+
 #ifdef FEATURE_CUT_LEVEL
     cliPrintLinef(" / FEATURE CUT LEVEL %d", FEATURE_CUT_LEVEL);
 #else
     cliPrintLinefeed();
 #endif
+
+#ifdef USE_UNIFIED_TARGET
+    cliPrint("# ");
+#ifdef USE_BOARD_INFO
+    if (strlen(getManufacturerId())) {
+        cliPrintf("manufacturer_id: %s   ", getManufacturerId());
+    }
+    if (strlen(getBoardName())) {
+        cliPrintf("board_name: %s   ", getBoardName());
+    }
+#endif // USE_BOARD_INFO
+
+#ifdef USE_CUSTOM_DEFAULTS
+    cliPrintf("custom defaults: %s", hasCustomDefaults() ? "YES" : "NO");
+#endif // USE_CUSTOM_DEFAULTS
+
+    cliPrintLinefeed();
+#endif // USE_UNIFIED_TARGET
 }
 
 #ifdef USE_RC_SMOOTHING_FILTER
@@ -4912,6 +4985,10 @@ const cliResourceValue_t resourceTable[] = {
     DEFS( OWNER_VTX_CS,        PG_VTX_IO_CONFIG, vtxIOConfig_t, csTag ),
     DEFS( OWNER_VTX_DATA,      PG_VTX_IO_CONFIG, vtxIOConfig_t, dataTag ),
     DEFS( OWNER_VTX_CLK,       PG_VTX_IO_CONFIG, vtxIOConfig_t, clockTag ),
+#endif
+#ifdef USE_PIN_PULL_UP_DOWN
+    DEFA( OWNER_PULLUP,        PG_PULLUP_CONFIG,   pinPullUpDownConfig_t, ioTag, PIN_PULL_UP_DOWN_COUNT ),
+    DEFA( OWNER_PULLDOWN,      PG_PULLDOWN_CONFIG, pinPullUpDownConfig_t, ioTag, PIN_PULL_UP_DOWN_COUNT ),
 #endif
 };
 
@@ -5833,21 +5910,25 @@ static void cliDshotTelemetryInfo(char *cmdline)
     UNUSED(cmdline);
 
     if (useDshotTelemetry) {
-        cliPrintLinef("Dshot reads: %u", readDoneCount);
-        cliPrintLinef("Dshot invalid pkts: %u", dshotInvalidPacketCount);
-        extern uint32_t setDirectionMicros;
-        cliPrintLinef("Dshot irq micros: %u", setDirectionMicros);
+        cliPrintLinef("Dshot reads: %u", dshotTelemetryState.readCount);
+        cliPrintLinef("Dshot invalid pkts: %u", dshotTelemetryState.invalidPacketCount);
+        uint32_t directionChangeCycles = dshotDMAHandlerCycleCounters.changeDirectionCompletedAt - dshotDMAHandlerCycleCounters.irqAt;
+        uint32_t directionChangeDurationUs = clockCyclesToMicros(directionChangeCycles);
+        cliPrintLinef("Dshot directionChange cycles: %u, micros: %u", directionChangeCycles, directionChangeDurationUs);
         cliPrintLinefeed();
 
 #ifdef USE_DSHOT_TELEMETRY_STATS
-        cliPrintLine("Motor     RPM   Invalid");
-        cliPrintLine("=====   =====   =======");
+        cliPrintLine("Motor      eRPM      RPM      Hz   Invalid");
+        cliPrintLine("=====   =======   ======   =====   =======");
 #else
-        cliPrintLine("Motor     RPM");
-        cliPrintLine("=====   =====");
+        cliPrintLine("Motor      eRPM      RPM      Hz");
+        cliPrintLine("=====   =======   ======   =====");
 #endif
         for (uint8_t i = 0; i < getMotorCount(); i++) {
-            cliPrintf("%5d   %5d   ", i, (int)getDshotTelemetry(i));
+            cliPrintf("%5d   %7d   %6d   %5d   ", i,
+                      (int)getDshotTelemetry(i) * 100,
+                      (int)getDshotTelemetry(i) * 100 * 2 / motorConfig()->motorPoleCount,
+                      (int)getDshotTelemetry(i) * 100 * 2 / motorConfig()->motorPoleCount / 60);
 #ifdef USE_DSHOT_TELEMETRY_STATS
             if (isDshotMotorTelemetryActive(i)) {
                 const int calcPercent = getDshotTelemetryMotorInvalidPercent(i);
@@ -5862,12 +5943,19 @@ static void cliDshotTelemetryInfo(char *cmdline)
         cliPrintLinefeed();
 
         const int len = MAX_GCR_EDGES;
+#ifdef DEBUG_BBDECODE
+        extern uint16_t bbBuffer[134];
+        for (int i = 0; i < 134; i++) {
+            cliPrintf("%u ", (int)bbBuffer[i]);
+        }
+        cliPrintLinefeed();
+#endif
         for (int i = 0; i < len; i++) {
-            cliPrintf("%u ", (int)inputBuffer[i]);
+            cliPrintf("%u ", (int)dshotTelemetryState.inputBuffer[i]);
         }
         cliPrintLinefeed();
         for (int i = 1; i < len; i++) {
-            cliPrintf("%u ", (int)(inputBuffer[i]  - inputBuffer[i-1]));
+            cliPrintf("%u ", (int)(dshotTelemetryState.inputBuffer[i]  - dshotTelemetryState.inputBuffer[i-1]));
         }
         cliPrintLinefeed();
     } else {
@@ -6249,7 +6337,6 @@ const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("msc", "switch into msc mode", NULL, cliMsc),
 #endif
 #endif
-    CLI_COMMAND_DEF("name", "name of craft", NULL, cliName),
 #ifndef MINIMAL_CLI
     CLI_COMMAND_DEF("play_sound", NULL, "[<index>]", cliPlaySound),
 #endif
@@ -6463,7 +6550,7 @@ void cliProcess(void)
 bool cliProcessCustomDefaults(void)
 {
     char *customDefaultsPtr = customDefaultsStart;
-    if (processingCustomDefaults || !isDefaults(customDefaultsPtr)) {
+    if (processingCustomDefaults || !isCustomDefaults(customDefaultsPtr)) {
         return false;
     }
 
@@ -6480,12 +6567,18 @@ bool cliProcessCustomDefaults(void)
         processCharacter(*customDefaultsPtr++);
     }
 
+    // Process a newline at the very end so that the last command gets executed,
+    // even when the file did not contain a trailing newline
+    processCharacter('\r');
+
     processingCustomDefaults = false;
 #if !defined(DEBUG_CUSTOM_DEFAULTS)
     cliWriter = cliWriterTemp;
 #endif
     memcpy(cliBuffer, cliBufferTemp, sizeof(cliBuffer));
     bufferIndex = bufferIndexTemp;
+
+    systemConfigMutable()->configurationState = CONFIGURATION_STATE_DEFAULTS_CUSTOM;
 
     return true;
 }
@@ -6513,4 +6606,5 @@ void cliEnter(serialPort_t *serialPort)
     resetCommandBatch();
 #endif
 }
+
 #endif // USE_CLI

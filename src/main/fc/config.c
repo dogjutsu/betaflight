@@ -30,6 +30,8 @@
 
 #include "build/debug.h"
 
+#include "cli/cli.h"
+
 #include "config/config_eeprom.h"
 #include "config/feature.h"
 
@@ -56,16 +58,18 @@
 #include "io/gps.h"
 #include "io/ledstrip.h"
 #include "io/serial.h"
+#include "io/vtx.h"
 
 #include "osd/osd.h"
 
 #include "pg/beeper.h"
 #include "pg/beeper_dev.h"
+#include "pg/gyrodev.h"
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
 #include "pg/motor.h"
 #include "pg/rx.h"
-#include "pg/gyrodev.h"
+#include "pg/vtx_table.h"
 
 #include "rx/rx.h"
 
@@ -73,8 +77,8 @@
 
 #include "sensors/acceleration.h"
 #include "sensors/battery.h"
-#include "sensors/gyro.h"
 #include "sensors/compass.h"
+#include "sensors/gyro.h"
 
 #include "common/sensor_alignment.h"
 
@@ -108,8 +112,8 @@ PG_RESET_TEMPLATE(systemConfig_t, systemConfig,
     .powerOnArmingGraceTime = 5,
     .boardIdentifier = TARGET_BOARD_IDENTIFIER,
     .hseMhz = SYSTEM_HSE_VALUE,  // Not used for non-F4 targets
-    .configured = false,
-    .schedulerOptimizeRate = true,
+    .configurationState = CONFIGURATION_STATE_DEFAULTS_BARE,
+    .schedulerOptimizeRate = SCHEDULER_OPTIMIZE_RATE_AUTO,
 );
 
 uint8_t getCurrentPidProfileIndex(void)
@@ -132,7 +136,7 @@ uint16_t getCurrentMinthrottle(void)
     return motorConfig()->minthrottle;
 }
 
-void resetConfigs(void)
+void resetConfig(void)
 {
     pgResetAll();
 
@@ -143,7 +147,7 @@ void resetConfigs(void)
 
 static void activateConfig(void)
 {
-    schedulerOptimizeRate(systemConfig()->schedulerOptimizeRate);
+    schedulerOptimizeRate(systemConfig()->schedulerOptimizeRate == SCHEDULER_OPTIMIZE_RATE_ON || (systemConfig()->schedulerOptimizeRate == SCHEDULER_OPTIMIZE_RATE_AUTO && motorConfig()->dev.useDshotTelemetry));
     loadPidProfile();
     loadControlRateProfile();
 
@@ -294,22 +298,6 @@ static void validateAndFixConfig(void)
         featureDisable(FEATURE_RX_SERIAL | FEATURE_RX_MSP | FEATURE_RX_PPM | FEATURE_RX_SPI);
     }
 
-#ifdef USE_SOFTSPI
-    if (featureIsEnabled(FEATURE_SOFTSPI)) {
-        featureDisable(FEATURE_RX_PPM | FEATURE_RX_PARALLEL_PWM | FEATURE_SOFTSERIAL);
-        batteryConfigMutable()->voltageMeterSource = VOLTAGE_METER_NONE;
-#if defined(STM32F10X)
-        featureDisable(FEATURE_LED_STRIP);
-        // rssi adc needs the same ports
-        featureDisable(FEATURE_RSSI_ADC);
-        // current meter needs the same ports
-        if (batteryConfig()->currentMeterSource == CURRENT_METER_ADC) {
-            batteryConfigMutable()->currentMeterSource = CURRENT_METER_NONE;
-        }
-#endif // STM32F10X
-    }
-#endif // USE_SOFTSPI
-
 #if defined(USE_ADC)
     if (featureIsEnabled(FEATURE_RSSI_ADC)) {
         rxConfigMutable()->rssi_channel = 0;
@@ -385,6 +373,13 @@ static void validateAndFixConfig(void)
         }
     }
 
+#if defined(USE_DSHOT_TELEMETRY) && defined(USE_DSHOT_BITBANG)
+    if (motorConfig()->dev.motorPwmProtocol == PWM_TYPE_PROSHOT1000 && motorConfig()->dev.useDshotTelemetry &&
+        motorConfig()->dev.useDshotBitbang == DSHOT_BITBANG_ON) {
+        motorConfigMutable()->dev.useDshotBitbang = DSHOT_BITBANG_AUTO;
+    }
+#endif    
+
 // clear features that are not supported.
 // I have kept them all here in one place, some could be moved to sections of code above.
 
@@ -440,10 +435,6 @@ static void validateAndFixConfig(void)
     featureDisable(FEATURE_RX_SPI);
 #endif
 
-#ifndef USE_SOFTSPI
-    featureDisable(FEATURE_SOFTSPI);
-#endif
-
 #ifndef USE_ESC_SENSOR
     featureDisable(FEATURE_ESC_SENSOR);
 #endif
@@ -483,7 +474,6 @@ static void validateAndFixConfig(void)
     bool usingDshotProtocol;
     switch (motorConfig()->dev.motorPwmProtocol) {
     case PWM_TYPE_PROSHOT1000:
-    case PWM_TYPE_DSHOT1200:
     case PWM_TYPE_DSHOT600:
     case PWM_TYPE_DSHOT300:
     case PWM_TYPE_DSHOT150:
@@ -500,20 +490,12 @@ static void validateAndFixConfig(void)
     }
 
 #if defined(USE_DSHOT_TELEMETRY)
-    if ((!usingDshotProtocol || motorConfig()->dev.useBurstDshot || !systemConfig()->schedulerOptimizeRate)
+    if ((!usingDshotProtocol || (motorConfig()->dev.useDshotBitbang == DSHOT_BITBANG_OFF && motorConfig()->dev.useBurstDshot == DSHOT_DMAR_ON) || systemConfig()->schedulerOptimizeRate == SCHEDULER_OPTIMIZE_RATE_OFF)
         && motorConfig()->dev.useDshotTelemetry) {
         motorConfigMutable()->dev.useDshotTelemetry = false;
     }
 #endif // USE_DSHOT_TELEMETRY
 #endif // USE_DSHOT
-
-    // Temporary workaround until RPM Filter supports dual-gyro using both sensors
-    // Once support is added remove this block
-#if defined(USE_MULTI_GYRO) && defined(USE_RPM_FILTER)
-    if (gyroConfig()->gyro_to_use == GYRO_CONFIG_USE_GYRO_BOTH && isRpmFilterEnabled()) {
-        gyroConfigMutable()->gyro_to_use = GYRO_CONFIG_USE_GYRO_1;
-    }
-#endif
 
 #if defined(USE_OSD)
     for (int i = 0; i < OSD_TIMER_COUNT; i++) {
@@ -523,6 +505,23 @@ static void validateAndFixConfig(void)
              osdConfigMutable()->timers[i] = osdTimerDefault[i];
          }
      }
+#endif
+
+#if defined(USE_VTX_COMMON) && defined(USE_VTX_TABLE)
+    // reset vtx band, channel, power if outside range specified by vtxtable
+    if (vtxSettingsConfig()->channel > vtxTableConfig()->channels) {
+        vtxSettingsConfigMutable()->channel = 0;
+        if (vtxSettingsConfig()->band > 0) {
+            vtxSettingsConfigMutable()->freq = 0; // band/channel determined frequency can't be valid anymore
+        }
+    }
+    if (vtxSettingsConfig()->band > vtxTableConfig()->bands) {
+        vtxSettingsConfigMutable()->band = 0;
+        vtxSettingsConfigMutable()->freq = 0; // band/channel determined frequency can't be valid anymore
+    }
+    if (vtxSettingsConfig()->power > vtxTableConfig()->powerLevels) {
+        vtxSettingsConfigMutable()->power = 0;
+    }
 #endif
 
 #if defined(TARGET_VALIDATECONFIG)
@@ -675,19 +674,11 @@ bool readEEPROM(void)
     return success;
 }
 
-static void ValidateAndWriteConfigToEEPROM(bool setConfigured)
+void writeUnmodifiedConfigToEEPROM(void)
 {
     validateAndFixConfig();
 
     suspendRxPwmPpmSignal();
-
-#ifdef USE_CONFIGURATION_STATE
-    if (setConfigured) {
-        systemConfigMutable()->configured = true;
-    }
-#else
-    UNUSED(setConfigured);
-#endif
 
     writeConfigToEEPROM();
 
@@ -697,7 +688,9 @@ static void ValidateAndWriteConfigToEEPROM(bool setConfigured)
 
 void writeEEPROM(void)
 {
-    ValidateAndWriteConfigToEEPROM(true);
+    systemConfigMutable()->configurationState = CONFIGURATION_STATE_CONFIGURED;
+
+    writeUnmodifiedConfigToEEPROM();
 }
 
 void writeEEPROMWithFeatures(uint32_t features)
@@ -705,16 +698,27 @@ void writeEEPROMWithFeatures(uint32_t features)
     featureDisableAll();
     featureEnable(features);
 
-    ValidateAndWriteConfigToEEPROM(true);
+    writeEEPROM();
 }
 
-void resetEEPROM(void)
+bool resetEEPROM(bool useCustomDefaults)
 {
-    resetConfigs();
+#if !defined(USE_CUSTOM_DEFAULTS)
+    UNUSED(useCustomDefaults);
+#else
+    if (useCustomDefaults) {
+        if (!resetConfigToCustomDefaults()) {
+            return false;
+        }
+    } else
+#endif
+    {
+        resetConfig();
+    }
 
-    ValidateAndWriteConfigToEEPROM(false);
+    writeUnmodifiedConfigToEEPROM();
 
-    activateConfig();
+    return true;
 }
 
 void ensureEEPROMStructureIsValid(void)
@@ -722,12 +726,12 @@ void ensureEEPROMStructureIsValid(void)
     if (isEEPROMStructureValid()) {
         return;
     }
-    resetEEPROM();
+    resetEEPROM(false);
 }
 
 void saveConfigAndNotify(void)
 {
-    ValidateAndWriteConfigToEEPROM(true);
+    writeEEPROM();
     readEEPROM();
     beeperConfirmationBeeps(1);
 }
@@ -782,11 +786,7 @@ void changePidProfile(uint8_t pidProfileIndex)
 
 bool isSystemConfigured(void)
 {
-#ifdef USE_CONFIGURATION_STATE
-    return systemConfig()->configured;
-#else
-    return true;
-#endif
+    return systemConfig()->configurationState == CONFIGURATION_STATE_CONFIGURED;
 }
 
 void setRebootRequired(void)

@@ -302,6 +302,11 @@ void pgResetFn_osdConfig(osdConfig_t *osdConfig)
         osdConfig->profile[i][0] = '\0';
     }
     osdConfig->rssi_dbm_alarm = 60;
+    osdConfig->gps_sats_show_hdop = false;
+
+    for (int i = 0; i < OSD_RCCHANNELS_COUNT; i++) {
+        osdConfig->rcChannels[i] = -1;
+    }
 }
 
 static void osdDrawLogo(int x, int y)
@@ -389,7 +394,11 @@ static void osdUpdateStats(void)
     int16_t value = 0;
 
 #ifdef USE_GPS
-    value = gpsSol.groundSpeed;
+    if (gpsConfig()->gps_use_3d_speed) {
+        value = gpsSol.speed3d;
+    } else {
+        value = gpsSol.groundSpeed;
+    }
     if (stats.max_speed < value) {
         stats.max_speed = value;
     }

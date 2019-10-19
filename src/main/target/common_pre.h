@@ -52,6 +52,7 @@
 #define USE_FAST_RAM
 #endif
 #define USE_DSHOT
+#define USE_DSHOT_BITBANG
 #define USE_DSHOT_TELEMETRY
 #define USE_DSHOT_TELEMETRY_STATS
 #define USE_RPM_FILTER
@@ -82,6 +83,7 @@
 #define USE_ITCM_RAM
 #define USE_FAST_RAM
 #define USE_DSHOT
+#define USE_DSHOT_BITBANG
 #define USE_DSHOT_TELEMETRY
 #define USE_DSHOT_TELEMETRY_STATS
 #define USE_RPM_FILTER
@@ -162,7 +164,7 @@
 
 #ifdef USE_DMA_RAM
 #define DMA_RAM __attribute__((section(".DMA_RAM")))
-#define DMA_RW_AXI __attribute__((section(".DMA_AXI_RW")))
+#define DMA_RW_AXI __attribute__((section(".DMA_RW_AXI")))
 #else
 #define DMA_RAM
 #define DMA_RW_AXI
@@ -280,6 +282,7 @@
 #define USE_SPEKTRUM_VTX_CONTROL
 #define USE_SPEKTRUM_VTX_TELEMETRY
 #define USE_SPEKTRUM_CMS_TELEMETRY
+#define USE_PIN_PULL_UP_DOWN
 #endif
 #endif
 

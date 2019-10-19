@@ -59,6 +59,7 @@
 #include "drivers/mco.h"
 #include "drivers/nvic.h"
 #include "drivers/persistent.h"
+#include "drivers/pin_pull_up_down.h"
 #include "drivers/pwm_esc_detect.h"
 #include "drivers/pwm_output.h"
 #include "drivers/rx/rx_pwm.h"
@@ -140,6 +141,7 @@
 #include "pg/motor.h"
 #include "pg/pinio.h"
 #include "pg/piniobox.h"
+#include "pg/pin_pull_up_down.h"
 #include "pg/pg.h"
 #include "pg/rx.h"
 #include "pg/rx_spi.h"
@@ -389,7 +391,7 @@ void init(void)
 #endif
 
     if (!readSuccess || !isEEPROMVersionValid() || strncasecmp(systemConfig()->boardIdentifier, TARGET_BOARD_IDENTIFIER, sizeof(TARGET_BOARD_IDENTIFIER))) {
-        resetEEPROM();
+        resetEEPROM(false);
     }
 
     systemState |= SYSTEM_STATE_CONFIG_LOADED;
@@ -440,7 +442,7 @@ void init(void)
             bothButtonsHeld = buttonAPressed() && buttonBPressed();
             if (bothButtonsHeld) {
                 if (--secondsRemaining == 0) {
-                    resetEEPROM();
+                    resetEEPROM(false);
 #ifdef USE_PERSISTENT_OBJECTS
                     persistentObjectWrite(PERSISTENT_OBJECT_RESET_REASON, RESET_NONE);
 #endif
@@ -660,7 +662,11 @@ void init(void)
 
     if (!sensorsAutodetect()) {
         // if gyro was not detected due to whatever reason, notify and don't arm.
-        if (isSystemConfigured()) {
+        if (true
+#if defined(USE_UNIFIED_TARGET)
+            && isSystemConfigured()
+#endif
+            ) {
             indicateFailure(FAILURE_MISSING_ACC, 2);
         }
         setArmingDisabled(ARMING_DISABLED_NO_GYRO);
@@ -692,6 +698,10 @@ void init(void)
 
 #ifdef USE_PINIO
     pinioInit(pinioConfig());
+#endif
+
+#ifdef USE_PIN_PULL_UP_DOWN
+    pinPullupPulldownInit();
 #endif
 
 #ifdef USE_PINIOBOX
@@ -908,6 +918,7 @@ void init(void)
 #endif // USE_RCDEVICE
 
 #ifdef USE_MOTOR
+    motorPostInit();
     motorEnable();
 #endif
 
